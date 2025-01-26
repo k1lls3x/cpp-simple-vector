@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cassert>
 #include <initializer_list>
-#include <memory>
 #include <stdexcept>
 #include <utility>
+#include "array_ptr.h"
 
 class ReserveProxyObj {
 public:
@@ -24,52 +24,46 @@ public:
 
     SimpleVector() noexcept = default;
 
-    explicit SimpleVector(ReserveProxyObj reserve) {
-        size_ = 0;
-        capacity_ = reserve.GetCapacityToReserve();
-        items_ = std::make_unique<Type[]>(capacity_);
-    }
+    explicit SimpleVector(ReserveProxyObj reserve)
+        : size_(0),
+          capacity_(reserve.GetCapacityToReserve()),
+          items_(capacity_ > 0 ? ArrayPtr<Type>(capacity_) : ArrayPtr<Type>()) {}
 
-    explicit SimpleVector(size_t size) {
+    explicit SimpleVector(size_t size)
+        : size_(size),
+          capacity_(size),
+          items_(size > 0 ? ArrayPtr<Type>(size) : ArrayPtr<Type>()) {
         if (size > 0) {
-            size_ = size;
-            capacity_ = size;
-            items_ = std::make_unique<Type[]>(capacity_);
-            std::fill(items_.get(), items_.get() + size_, Type{});
+            std::fill(items_.Get(), items_.Get() + size_, Type{});
         }
     }
 
     SimpleVector(SimpleVector&& other) noexcept
+        : size_(std::exchange(other.size_, 0)),
+          capacity_(std::exchange(other.capacity_, 0)),
+          items_(std::move(other.items_)) {}
+
+    SimpleVector(const SimpleVector& other)
         : size_(other.size_),
           capacity_(other.capacity_),
-          items_(std::move(other.items_)) {
-        other.size_ = 0;
-        other.capacity_ = 0;
+          items_(ArrayPtr<Type>(capacity_)) {
+        std::copy(other.items_.Get(), other.items_.Get() + size_, items_.Get());
     }
 
-    SimpleVector(const SimpleVector& other) {
-        size_ = other.size_;
-        capacity_ = other.capacity_;
-        items_ = std::make_unique<Type[]>(capacity_);
-        std::copy(other.items_.get(), other.items_.get() + size_, items_.get());
-    }
-
-    SimpleVector(size_t size, const Type& value) {
-        if (size > 0) {
-            size_ = size;
-            capacity_ = size;
-            items_ = std::make_unique<Type[]>(capacity_);
-            for (size_t i = 0; i < size_; ++i) {
-                items_[i] = value;
-            }
+    SimpleVector(size_t size, const Type& value)
+        : size_(size),
+          capacity_(size),
+          items_(size > 0 ? ArrayPtr<Type>(size) : ArrayPtr<Type>()) {
+        for (size_t i = 0; i < size_; ++i) {
+            items_[i] = value;
         }
     }
 
-    SimpleVector(std::initializer_list<Type> init) {
-        size_ = init.size();
-        capacity_ = size_;
-        items_ = std::make_unique<Type[]>(capacity_);
-        std::copy(init.begin(), init.end(), items_.get());
+    SimpleVector(std::initializer_list<Type> init)
+        : size_(init.size()),
+          capacity_(size_),
+          items_(ArrayPtr<Type>(capacity_)) {
+        std::copy(init.begin(), init.end(), items_.Get());
     }
 
     size_t GetSize() const noexcept {
@@ -77,21 +71,15 @@ public:
     }
 
     SimpleVector& operator=(SimpleVector&& rhs) noexcept {
-        if (this == &rhs) {
-            return *this;
+        if (this != &rhs) {
+            if (rhs.IsEmpty()) {
+                Clear();
+                return *this;
+            }
+            items_ = std::move(rhs.items_);
+            size_ = std::exchange(rhs.size_, 0);
+            capacity_ = std::exchange(rhs.capacity_, 0);
         }
-
-        items_.reset();
-        size_ = 0;
-        capacity_ = 0;
-
-        size_ = rhs.size_;
-        capacity_ = rhs.capacity_;
-        items_ = std::move(rhs.items_);
-
-        rhs.size_ = 0;
-        rhs.capacity_ = 0;
-
         return *this;
     }
 
@@ -101,30 +89,24 @@ public:
                 Clear();
                 return *this;
             }
-            SimpleVector<Type> arr_ptr(rhs.size_);
-            std::copy(rhs.begin(), rhs.end(), arr_ptr.begin());
-            arr_ptr.capacity_ = rhs.capacity_;
-            swap(arr_ptr);
+            SimpleVector<Type> temp(rhs);
+            swap(temp);
         }
         return *this;
     }
 
     void Reserve(size_t new_capacity) {
         if (new_capacity > capacity_) {
-            auto new_items = std::make_unique<Type[]>(new_capacity);
-            std::move(items_.get(), items_.get() + size_, new_items.get());
-            items_ = std::move(new_items);
+            ArrayPtr<Type> new_items(new_capacity);
+            std::move(items_.Get(), items_.Get() + size_, new_items.Get());
+            items_.swap(new_items);
             capacity_ = new_capacity;
         }
     }
 
     void PushBack(const Type& item) {
         if (size_ == capacity_) {
-            size_t new_capacity = capacity_ ? capacity_ * 2 : 1;
-            auto new_items = std::make_unique<Type[]>(new_capacity);
-            std::copy(items_.get(), items_.get() + size_, new_items.get());
-            items_ = std::move(new_items);
-            capacity_ = new_capacity;
+            Reserve(capacity_ ? capacity_ * 2 : 1);
         }
         items_[size_] = item;
         ++size_;
@@ -132,71 +114,53 @@ public:
 
     void PushBack(Type&& item) {
         if (size_ == capacity_) {
-            size_t new_capacity = capacity_ ? capacity_ * 2 : 1;
-            auto new_items = std::make_unique<Type[]>(new_capacity);
-            std::move(items_.get(), items_.get() + size_, new_items.get());
-            items_ = std::move(new_items);
-            capacity_ = new_capacity;
+            Reserve(capacity_ ? capacity_ * 2 : 1);
         }
         items_[size_] = std::move(item);
         ++size_;
     }
 
     Iterator Insert(ConstIterator pos, const Type& value) {
-        if (pos < begin() || pos > end()) {
-            throw std::out_of_range("Insert: position out of range");
-        }
+        assert(pos >= begin() && pos <= end());
         size_t index = pos - begin();
+
         if (size_ == capacity_) {
-            size_t new_capacity = capacity_ ? capacity_ * 2 : 1;
-            auto new_items = std::make_unique<Type[]>(new_capacity);
-            std::copy(items_.get(), items_.get() + index, new_items.get());
-            new_items[index] = value;
-            std::copy(items_.get() + index, items_.get() + size_, new_items.get() + index + 1);
-            items_ = std::move(new_items);
-            capacity_ = new_capacity;
-        } else {
-            for (size_t i = size_; i > index; --i) {
-                items_[i] = std::move(items_[i - 1]);
-            }
-            items_[index] = value;
+            Reserve(capacity_ ? capacity_ * 2 : 1);
         }
+
+        for (size_t i = size_; i > index; --i) {
+            items_[i] = std::move(items_[i - 1]);
+        }
+
+        items_[index] = value;
         ++size_;
         return begin() + index;
     }
 
     Iterator Insert(ConstIterator pos, Type&& value) {
-        if (pos < begin() || pos > end()) {
-            throw std::out_of_range("Insert: position out of range");
-        }
+        assert(pos >= begin() && pos <= end());
         size_t index = pos - begin();
+
         if (size_ == capacity_) {
-            size_t new_capacity = capacity_ ? capacity_ * 2 : 1;
-            auto new_items = std::make_unique<Type[]>(new_capacity);
-            std::move(items_.get(), items_.get() + index, new_items.get());
-            new_items[index] = std::move(value);
-            std::move(items_.get() + index, items_.get() + size_, new_items.get() + index + 1);
-            items_ = std::move(new_items);
-            capacity_ = new_capacity;
-        } else {
-            for (size_t i = size_; i > index; --i) {
-                items_[i] = std::move(items_[i - 1]);
-            }
-            items_[index] = std::move(value);
+            Reserve(capacity_ ? capacity_ * 2 : 1);
         }
+
+        for (size_t i = size_; i > index; --i) {
+            items_[i] = std::move(items_[i - 1]);
+        }
+
+        items_[index] = std::move(value);
         ++size_;
         return begin() + index;
     }
 
     void PopBack() noexcept {
-        if (size_ == 0) return;
+        assert(size_ > 0);
         --size_;
     }
 
     Iterator Erase(ConstIterator pos) {
-        if (pos < begin() || pos >= end()) {
-            throw std::out_of_range("Index out of range");
-        }
+        assert(pos >= begin() && pos <= end());
         size_t index = pos - begin();
         for (size_t i = index; i < size_ - 1; ++i) {
             items_[i] = std::move(items_[i + 1]);
@@ -263,19 +227,19 @@ public:
     }
 
     Iterator begin() noexcept {
-        return items_.get();
+        return items_.Get();
     }
 
     Iterator end() noexcept {
-        return items_.get() + size_;
+        return items_.Get() + size_;
     }
 
     ConstIterator begin() const noexcept {
-        return items_.get();
+        return items_.Get();
     }
 
     ConstIterator end() const noexcept {
-        return items_.get() + size_;
+        return items_.Get() + size_;
     }
 
     ConstIterator cbegin() const noexcept {
@@ -289,7 +253,7 @@ public:
 private:
     size_t size_ = 0;
     size_t capacity_ = 0;
-    std::unique_ptr<Type[]> items_;
+    ArrayPtr<Type> items_;
 };
 
 template <typename Type>
